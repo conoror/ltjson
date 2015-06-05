@@ -241,8 +241,7 @@ static int init_tree(unsigned char **textp, struct lzjson_node **curnodep)
     /* Initialise the tree:
        The first two nodes are done: g_basenode, g_storenode
        Add in the root of the json tree: storenode->jsonroot->blanknode
-       text is consumed including the leading [ or { and any leading
-       whitespace.
+       Initial text is consumed including the leading [ or {
        Returns 0 on success, -ENOMEM or -EILSEQ on error (no cleanup)
     */
 
@@ -289,7 +288,6 @@ static int init_tree(unsigned char **textp, struct lzjson_node **curnodep)
     }
 
     text++;
-    text = strip_space(text);
 
     g_storenode->next = newnode;    /* Link store node to JSON root */
     curnode = newnode;              /* curnode is JSON root */
@@ -308,6 +306,37 @@ static int init_tree(unsigned char **textp, struct lzjson_node **curnodep)
     *curnodep = newnode;
     *textp = text;
     return 0;
+}
+
+
+
+
+static int is_valid_tree(struct lzjson_node *tree)
+{
+    /* Check to see if the pointer points to a minimally valid
+       tree (whether partially filled or not). This function does
+       not read or set the g_basenode or g_storenode globals.
+
+       Returns 1 if valid else 0
+    */
+
+    struct lzjson_node *snode;      /* storenode */
+
+    if (!tree)
+        return 0;
+
+    if (tree->ntype != LZJSON_BASE)
+        return 0;
+
+    snode = tree->ancnode + 1;
+
+    if (snode->ntype != LZJSON_STORE)
+        return 0;
+
+    if (!snode->next)
+        return 0;
+
+    return 1;
 }
 
 
@@ -788,7 +817,12 @@ int lzjson_parse(unsigned char *text, struct lzjson_node **nodepp)
     g_basenode = *nodepp;   /* Can be NULL */
 
     if (g_basenode)
+    {
+        if (!is_valid_tree(g_basenode))
+            return -EINVAL;
+
         g_storenode = g_basenode->ancnode + 1;
+    }
 
     if (text == NULL)
     {
@@ -849,10 +883,10 @@ int lzjson_parse(unsigned char *text, struct lzjson_node **nodepp)
 
         if (ret == 1)
             expect_a_colon = 1;
-
-        text = strip_space(text);
     }
 
+
+    text = strip_space(text);
 
     while(*text)
     {
@@ -1013,6 +1047,34 @@ int lzjson_parse(unsigned char *text, struct lzjson_node **nodepp)
 
 
 
+int lzjson_free_tree(struct lzjson_node **nodepp)
+{
+    /* Free up all the memory associated with tree pointed
+       to by nodepp. Tree has to be valid but does not have
+       to be closed.
+       Uses the globals which I must do something about...
+
+       Returns 0 on success and writes NULL to *nodepp
+       or -EINVAL if tree not valid
+    */
+
+    if (!nodepp)
+        return 0;   /* whatever */
+
+    if (!is_valid_tree(*nodepp))
+        return -EINVAL;
+
+    g_basenode = *nodepp;
+    g_storenode = g_basenode->ancnode + 1;
+
+    destroy_tree();
+    *nodepp = NULL;
+    return 0;
+}
+
+
+
+
 const char *lzjson_lasterror(void)
 {
     return g_lasterr;
@@ -1032,7 +1094,7 @@ static void print_nodeinfo(struct lzjson_node *node,
     switch (node->ntype)
     {
         case LZJSON_EMPTY:
-            printf("Empty\n");
+            printf("\n");
         break;
 
         case LZJSON_NULL:
@@ -1081,18 +1143,15 @@ int lzjson_display_tree(struct lzjson_node *tree)
     struct stringstore *storep;
     int depth = 0;
 
-    if (!tree)
+    if (!is_valid_tree(tree))
         return -EINVAL;
 
-    /* Get the storenode and store pointer and check state */
+    /* Get the storenode and store pointer */
 
     snode = tree->ancnode + 1;
     storep = (struct stringstore *)snode->val.p;
 
     if (snode->ancnode)         /* Tree in continuation mode */
-        return -EINVAL;
-
-    if (!snode->next)
         return -EINVAL;
 
     curnode = snode->next;
@@ -1156,18 +1215,13 @@ int lzjson_search_name(struct lzjson_node *tree, const char *searchtxt,
     struct lzjson_node *curnode, *snode;
     struct stringstore *storep;
 
-    if (!tree || !searchtxt || !answerp)
+    if (!is_valid_tree(tree) || !searchtxt || !answerp)
         return -EINVAL;
-
-    /* Get the storenode and store pointer and check state */
 
     snode = tree->ancnode + 1;
     storep = (struct stringstore *)snode->val.p;
 
     if (snode->ancnode)         /* Tree in continuation mode */
-        return -EINVAL;
-
-    if (!snode->next)           /* No JSON tree */
         return -EINVAL;
 
     curnode = snode->next;
@@ -1234,10 +1288,8 @@ const char *lzjson_get_name(struct lzjson_node *tree,
     struct stringstore *storep;
     static const char *emptyname = "";
 
-    if (!tree || !node)
+    if (!is_valid_tree(tree) || !node)
         return 0;
-
-    /* Get the storenode and store pointer and check state */
 
     snode = tree->ancnode + 1;
     storep = (struct stringstore *)snode->val.p;
@@ -1245,12 +1297,8 @@ const char *lzjson_get_name(struct lzjson_node *tree,
     if (snode->ancnode)         /* Tree in continuation mode */
         return 0;
 
-    if (!snode->next)           /* No JSON tree */
-        return 0;
-
     if (node->name == 0)
         return 0;
-
     else if (node->name == LZJSON_BLANKNAME)
         return emptyname;
 
@@ -1271,10 +1319,8 @@ const char *lzjson_get_sval(struct lzjson_node *tree,
     struct lzjson_node *snode;
     struct stringstore *storep;
 
-    if (!tree || !node)
+    if (!is_valid_tree(tree) || !node)
         return 0;
-
-    /* Get the storenode and store pointer and check state */
 
     snode = tree->ancnode + 1;
     storep = (struct stringstore *)snode->val.p;
@@ -1282,13 +1328,47 @@ const char *lzjson_get_sval(struct lzjson_node *tree,
     if (snode->ancnode)         /* Tree in continuation mode */
         return 0;
 
-    if (!snode->next)           /* No JSON tree */
-        return 0;
-
     if (node->ntype != LZJSON_STRING)
         return 0;
 
     return (const char *)(storep->str + node->val.s);
+}
+
+
+
+
+int lzjson_tree_usage(struct lzjson_node *tree)
+{
+    /* Returns the memory usage consumed by the JSON tree
+       Tree must be a valid one but does not have to be closed.
+       Continuances and closures are preserved - no changes are
+       made by this call and globals are not used.
+
+       Returns +ve bytes on success or -EINVAL if tree not valid
+    */
+
+    struct lzjson_node *curnode, *snode;
+    struct stringstore *storep;
+    int nbytes;
+
+    if (!is_valid_tree(tree))
+        return -EINVAL;
+
+    /* Get the storenode and store pointer */
+
+    snode = tree->ancnode + 1;
+    storep = (struct stringstore *)snode->val.p;
+
+    nbytes = storep->nalloc;
+
+    curnode = tree->ancnode;    /* first basenode */
+
+    do {
+        nbytes += LZJSON_NODEALLOCSIZE * sizeof(struct lzjson_node);
+        curnode = curnode->next;
+    } while (curnode != curnode->ancnode);
+
+    return nbytes;
 }
 
 

@@ -43,6 +43,8 @@ struct lzjson_node
 
 
 extern int lzjson_parse(unsigned char *text, struct lzjson_node **nodepp);
+extern int lzjson_free_tree(struct lzjson_node **nodepp);
+
 extern const char *lzjson_lasterror(void);
 
 extern int lzjson_display_tree(struct lzjson_node *tree);
@@ -53,6 +55,8 @@ extern const char *lzjson_get_name(struct lzjson_node *tree,
                                    struct lzjson_node *node);
 extern const char *lzjson_get_sval(struct lzjson_node *tree,
                                    struct lzjson_node *node);
+
+extern int lzjson_tree_usage(struct lzjson_node *tree);
 
 
 /* vi:set expandtab ts=4 sw=4: */

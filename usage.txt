@@ -1,0 +1,90 @@
+Basic usage is to:
+
+    #include "ltjson.h"
+
+Declare a jsontree and init the pointer to NULL (important):
+
+    ltjson_node_t *jsontree = 0;
+
+Parse the tree in buffer into the jsontree:
+
+    ret = ltjson_parse(&jsontree, buffer);
+
+This will allocate memory as needed. If the tree in buffer is incomplete,
+ret will be -EAGAIN and you can call ltjson_parse again with the same
+parameters. If there's an error ret will be -ENOMEM, -EILSEQ or -EINVAL
+(see function descriptions below).
+
+Once ret is 0 you can display the tree to the console with:
+
+    ltjson_display(jsontree);
+
+
+/**
+ *  ltjson_parse(treeptr, text) - Parse text into JSON tree
+ *      @treeptr:   Pointer to json tree root
+ *      @text:      UTF-8 unsigned char text
+ *
+ *  Scan the JSON provided @text and parse it into the tree which is
+ *  pointed to by treeptr. If @*treeptr is NULL then a new tree is created.
+ *  If not NULL the memory storage is reused if the tree is closed or
+ *  text continues to be added if the tree is open.
+ *  If @text is NULL, the tree is forced closed and into an error state.
+ *
+ *  Returns:    0 on success and the tree is parsed and closed
+ *              -EAGAIN if tree incomplete and more text needed
+ *              -EINVAL if invalid argument
+ *              -EILSEQ if invalid JSON sequence (reason available)
+ *              -ENOMEM if out of memory (all storage is then destroyed
+ *                                        and *treeptr will be set NULL)
+ *              +ve number indicating the number of leftover bytes
+ */
+
+/**
+ *  ltjson_free(treeptr) - Free up all memory associate with tree
+ *      @treeptr:   Pointer to valid tree
+ *
+ *  Returns:    0 on success, writing NULL to *treeptr
+ *              -EINVAL if tree is not valid
+ */
+
+/**
+ *  ltjson_lasterror(tree) - Describe the last error that occurred
+ *      @tree:  Valid tree
+ *
+ *  Returns:    A pointer to a constant string describing the error
+ *              NULL if tree is not valid
+ */
+
+/**
+ *  ltjson_display(tree) - Display the contents of the JSON tree
+ *      @tree:   Valid closed and finalised (no error state) tree
+ *
+ *  Returns:    0 on success
+ *              -EINVAL if tree is not valid or closed
+ */
+
+/**
+ *  ltjson_memory(tree) - returns memory usage of json tree
+ *      @tree:  Valid tree
+ *
+ *  Tree does not have to be closed. No changes are made
+ *
+ *  Returns +ve bytes on success or -EINVAL if tree not valid
+ */
+
+/**
+ *  ltjson_findname(tree, name, nodeptr) - Find name in tree
+ *      @tree:      Valid closed and finalised (no error state) tree
+ *      @name:      Search text (utf-8)
+ *      @nodeptr:   Answer and/or starting point
+ *
+ *  If nodeptr points to NULL, the search begins at the root of the
+ *  tree. Otherwise, the search proceeds from that node point on.
+ *
+ *  Returns:    0 on success, pointing nodeptr to the answer.
+ *                   nodeptr will be NULL if the search fails.
+ *              -EINVAL if tree is not valid or closed
+ *                   or either name or nodeptr are NULL.
+ */
+

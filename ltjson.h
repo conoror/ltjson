@@ -1,6 +1,6 @@
 /*
- *  JSON implementation in C
- *  Header include
+ *  Light JSON implementation in C
+ *  Header include file
  *
  *  Distribution and use of this software are as per the terms of the
  *  Simplified BSD License (also known as the "2-Clause License")
@@ -8,55 +8,56 @@
  *  Copyright 2015 Conor F. O'Rourke. All rights reserved.
  */
 
-
-typedef enum {
-    LZJSON_EMPTY,
-    LZJSON_NULL,
-    LZJSON_BOOL,
-    LZJSON_ARRAY,
-    LZJSON_OBJECT,
-    LZJSON_DOUBLE,
-    LZJSON_INTEGER,
-    LZJSON_STRING,
-    LZJSON_STORE,
-    LZJSON_BASE
-} lzjson_nodetype_t;
+#ifndef _LTJSON_H_
+#define _LTJSON_H_
 
 
-struct lzjson_node
-{
-    lzjson_nodetype_t ntype;
-    int name;
-
-    union {
-        int s;
-        int nused;
-        long l;
-        double d;
-        struct lzjson_node *subnode;
-        void *p;
-    } val;
-
-    struct lzjson_node *next;
-    struct lzjson_node *ancnode;
+enum ltjson_nodetype {
+    LTJSON_EMPTY,
+    LTJSON_NULL,
+    LTJSON_BOOL,
+    LTJSON_ARRAY,
+    LTJSON_OBJECT,
+    LTJSON_DOUBLE,
+    LTJSON_INTEGER,
+    LTJSON_STRING,
+    LTJSON_BASE
 };
 
 
-extern int lzjson_parse(unsigned char *text, struct lzjson_node **nodepp);
-extern int lzjson_free_tree(struct lzjson_node **nodepp);
+typedef struct ltjson_node
+{
+    enum ltjson_nodetype ntype;
+    unsigned char *name;
+    int nameoff;
 
-extern const char *lzjson_lasterror(void);
+    union {
+        int nused;
+        long l;
+        double d;
+        struct ltjson_node *subnode;
+        int vlen;
+        unsigned char *vstr;
+    } val;
 
-extern int lzjson_display_tree(struct lzjson_node *tree);
-extern int lzjson_search_name(struct lzjson_node *tree, const char *name,
-                              struct lzjson_node **answerp);
+    struct ltjson_node *next;
+    struct ltjson_node *ancnode;
 
-extern const char *lzjson_get_name(struct lzjson_node *tree,
-                                   struct lzjson_node *node);
-extern const char *lzjson_get_sval(struct lzjson_node *tree,
-                                   struct lzjson_node *node);
+} ltjson_node_t;
 
-extern int lzjson_tree_usage(struct lzjson_node *tree);
+
+extern int ltjson_parse(ltjson_node_t **treeptr, unsigned char *text);
+extern int ltjson_free(ltjson_node_t **treeptr);
+
+extern const char *ltjson_lasterror(ltjson_node_t *tree);
+extern int ltjson_display(ltjson_node_t *tree);
+extern int ltjson_memory(ltjson_node_t *tree);
+
+extern int ltjson_findname(ltjson_node_t *tree, const char *name,
+                           ltjson_node_t **nodeptr);
+
+
+#endif  /* _LTJSON_H_ */
 
 
 /* vi:set expandtab ts=4 sw=4: */

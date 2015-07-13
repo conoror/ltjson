@@ -3,19 +3,18 @@
 #include <errno.h>
 #include <stdlib.h>
 
-#include "lzjson.h"
+#include "ltjson.h"
 
 
 int main()
 {
-    struct lzjson_node *jsontree = 0;
-    struct lzjson_node *searchnode;
+    ltjson_node_t *jsontree = 0;
+    ltjson_node_t *searchnode;
     int ret;
     FILE *fp;
     unsigned char buffer[256];
-    const char *str;
 
-    printf("Stuff and stuff\n");
+    printf("Testing of ltjson library...\n");
 
     fp = fopen("test.txt", "r");
     if (!fp)
@@ -28,12 +27,12 @@ int main()
     {
         buffer[ret] = 0;
 
-        ret = lzjson_parse(buffer, &jsontree);
+        ret = ltjson_parse(&jsontree, buffer);
 
         if (ret == -EAGAIN)
         {
             printf("Parse returns eagain. Around we go again\n");
-            ret = lzjson_tree_usage(jsontree);
+            ret = ltjson_memory(jsontree);
             if (ret > 0)
                 printf("Tree memory usage = %d bytes\n", ret);
         }
@@ -42,10 +41,7 @@ int main()
             printf("Error string = %s\n", strerror(-ret));
 
             if (ret == -EILSEQ)
-            {
-                printf("Further info: %s\n", lzjson_lasterror());
-            }
-
+                printf("Further info: %s\n", ltjson_lasterror(jsontree));
             exit(1);
         }
     }
@@ -57,31 +53,38 @@ int main()
         exit(1);
     }
 
-    ret = lzjson_tree_usage(jsontree);
+    ret = ltjson_memory(jsontree);
     if (ret > 0)
         printf("Final tree memory usage = %d bytes\n", ret);
 
-    lzjson_display_tree(jsontree);
+    ltjson_display(jsontree);
 
-    ret = lzjson_search_name(jsontree, "city", &searchnode);
+    searchnode = NULL;
 
-    if (ret == 0)
-    {
-        if (searchnode == NULL)
-            printf("Not found\n");
+    do {
+        ret = ltjson_findname(jsontree, "number", &searchnode);
+
+        if (ret == 0)
+        {
+            if (searchnode)
+            {
+                printf("found!\n");
+                printf("%s = ", searchnode->name);
+                if (searchnode->ntype == LTJSON_STRING)
+                    printf("%s\n", searchnode->val.vstr);
+                else
+                    printf("????\n");
+            }
+        }
         else
         {
-            printf("found!\n");
-            str = lzjson_get_name(jsontree, searchnode);
-            if (str) printf("%s = ", str);
-            str = lzjson_get_sval(jsontree, searchnode);
-            if (str) printf("%s\n", str);
+            printf("Search returns error\n");
+            break;
         }
-    }
-    else
-        printf("Search returns error\n");
 
-    ret = lzjson_free_tree(&jsontree);
+    } while (searchnode);
+
+    ret = ltjson_free(&jsontree);
     printf("return from free = %s\n", strerror(-ret));
 
     return 0;

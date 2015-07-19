@@ -50,11 +50,14 @@ extern int ltjson_parse(ltjson_node_t **treeptr, unsigned char *text);
 extern int ltjson_free(ltjson_node_t **treeptr);
 
 extern const char *ltjson_lasterror(ltjson_node_t *tree);
-extern int ltjson_display(ltjson_node_t *tree);
+extern int ltjson_display(ltjson_node_t *tree, ltjson_node_t *rnode);
 extern int ltjson_memory(ltjson_node_t *tree);
 
 extern int ltjson_findname(ltjson_node_t *tree, const char *name,
                            ltjson_node_t **nodeptr);
+
+extern int ltjson_pathrefer(ltjson_node_t *tree, const char *path,
+                            ltjson_node_t **nodeptr, int nnodes);
 
 
 #endif  /* _LTJSON_H_ */

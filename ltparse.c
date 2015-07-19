@@ -46,6 +46,36 @@ static int is_valid_tree(ltjson_node_t *node)
 
 
 
+/*
+ *  is_closed_tree(node)
+ *
+ *  Calls is_valid_tree above and adds checks to see if the tree
+ *  is closed and not in any error state.
+ *
+ *  Returns 1 if closed, 0 if not
+ */
+
+static int is_closed_tree(ltjson_node_t *node)
+{
+    ltjson_info_t *jsoninfo;
+
+    if (!is_valid_tree(node))
+        return 0;
+
+    jsoninfo = (ltjson_info_t *)node;
+
+    if (jsoninfo->lasterr || jsoninfo->open)
+        return 0;
+
+    if (jsoninfo->root->ntype == LTJSON_EMPTY)
+        return 0;
+
+    return 1;
+}
+
+
+
+
 /**
  *  ltjson_parse(treeptr, text) - Parse text into JSON tree
  *      @treeptr:   Pointer to json tree root

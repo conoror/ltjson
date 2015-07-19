@@ -99,33 +99,36 @@ static void print_nodeinfo(ltjson_node_t *node, int spaces)
 
 /**
  *  ltjson_display(tree) - Display the contents of the JSON tree
- *      @tree:   Valid closed and finalised (no error state) tree
+ *      @tree:   Valid closed tree
+ *      @rnode:  Optional node to act as display root (NULL if unused)
  *
  *  Returns:    0 on success
  *              -EINVAL if tree is not valid or closed
  */
 
-int ltjson_display(ltjson_node_t *tree)
+int ltjson_display(ltjson_node_t *tree, ltjson_node_t *rnode)
 {
-    ltjson_info_t *jsoninfo;
     ltjson_node_t *curnode;
     int depth = 0;
 
-
-    if (!is_valid_tree(tree))
-        return -EINVAL;
-
-    jsoninfo = (ltjson_info_t *)tree;
-
-    if (jsoninfo->lasterr)
+    if (!is_closed_tree(tree))
         return -EINVAL;
 
     printf("JSON tree:\n");
 
-    curnode = jsoninfo->root;
+    if (!rnode)
+        rnode = tree;
 
-    while (curnode)
+    if (rnode->ntype != LTJSON_ARRAY &&
+        rnode->ntype != LTJSON_OBJECT)
     {
+        print_nodeinfo(rnode, 4);
+        return 0;
+    }
+
+    curnode = rnode;
+
+    do {
         print_nodeinfo(curnode, 4 + 4 * depth);
 
         if (curnode->ntype == LTJSON_ARRAY ||
@@ -155,6 +158,9 @@ int ltjson_display(ltjson_node_t *tree)
             else
                 printf("}\n");
 
+            if (curnode == rnode)
+                break;
+
             if (curnode->next)
             {
                 curnode = curnode->next;
@@ -162,7 +168,7 @@ int ltjson_display(ltjson_node_t *tree)
             }
         }
 
-    }
+    } while (curnode && curnode != rnode);
 
     return 0;
 }
@@ -212,15 +218,15 @@ int ltjson_memory(ltjson_node_t *tree)
 
 /**
  *  ltjson_findname(tree, name, nodeptr) - Find name in tree
- *      @tree:      Valid closed and finalised (no error state) tree
+ *      @tree:      Valid closed tree
  *      @name:      Search text (utf-8)
  *      @nodeptr:   Answer and/or starting point
  *
  *  If nodeptr points to NULL, the search begins at the root of the
  *  tree. Otherwise, the search proceeds from that node point on.
  *
- *  Returns:    0 on success, pointing nodeptr to the answer.
- *                   nodeptr will be NULL if the search fails.
+ *  Returns:    1 on success, pointing nodeptr to the answer.
+ *              0 if not found (sets nodeptr to NULL)
  *              -EINVAL if tree is not valid or closed
  *                   or either name or nodeptr are NULL.
  */
@@ -228,41 +234,28 @@ int ltjson_memory(ltjson_node_t *tree)
 int ltjson_findname(ltjson_node_t *tree, const char *name,
                     ltjson_node_t **nodeptr)
 {
-    ltjson_info_t *jsoninfo;
     ltjson_node_t *curnode;
-    int nodesearch = 1;
 
-    if (!is_valid_tree(tree) || !name || !nodeptr)
-        return -EINVAL;
-
-    jsoninfo = (ltjson_info_t *)tree;
-
-    if (jsoninfo->lasterr)
+    if (!is_closed_tree(tree) || !name || !nodeptr)
         return -EINVAL;
 
     if (*nodeptr)
-        nodesearch = 0;     /* Do not search until node match */
-
-    curnode = jsoninfo->root;
+        curnode = traverse_tree_nodes(*nodeptr);
+    else
+        curnode = tree;
 
     while (curnode)
     {
-        if (!nodesearch)
-        {
-            if (*nodeptr == curnode)
-                nodesearch = 1;
-        }
-
         /* We're searching for names. Any node with a proper name
            has an immediate ancestor which is an object */
 
-        else if (curnode->ancnode && curnode->ancnode->ntype == LTJSON_OBJECT)
+        if (curnode->ancnode && curnode->ancnode->ntype == LTJSON_OBJECT)
         {
             if (strcmp((char *)curnode->name, name) == 0)
             {
                 /* found! */
                 *nodeptr = curnode;
-                return 0;
+                return 1;
             }
         }
 

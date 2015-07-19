@@ -6,21 +6,19 @@
 #include "ltjson.h"
 
 
-int main()
+static ltjson_node_t *jsontree = 0;
+
+int dump_file(char *filename)
 {
-    ltjson_node_t *jsontree = 0;
-    ltjson_node_t *searchnode;
     int ret;
     FILE *fp;
-    unsigned char buffer[256];
+    unsigned char buffer[64];
 
-    printf("Testing of ltjson library...\n");
-
-    fp = fopen("test.txt", "r");
+    fp = fopen(filename, "r");
     if (!fp)
     {
         perror("Open fail");
-        exit(1);
+        return -1;
     }
 
     while ((ret = fread(buffer, 1, sizeof(buffer) - 1, fp)) > 0)
@@ -42,7 +40,8 @@ int main()
 
             if (ret == -EILSEQ)
                 printf("Further info: %s\n", ltjson_lasterror(jsontree));
-            exit(1);
+            fclose(fp);
+            return -1;
         }
     }
     fclose(fp);
@@ -50,39 +49,84 @@ int main()
     if (ret == -EAGAIN)
     {
         printf("Tree was never closed.\n");
-        exit(1);
+        return -1;
     }
 
     ret = ltjson_memory(jsontree);
     if (ret > 0)
         printf("Final tree memory usage = %d bytes\n", ret);
 
-    ltjson_display(jsontree);
+    ltjson_display(jsontree, 0);
 
-    searchnode = NULL;
+    return 0;
+}
+
+
+int main()
+{
+    ltjson_node_t *searchnode[10];
+    int ret;
+
+    printf("Testing of ltjson library...\n");
+
+    if (dump_file("test.txt"))
+        exit(1);
+
+    searchnode[0] = NULL;
 
     do {
-        ret = ltjson_findname(jsontree, "number", &searchnode);
+        ret = ltjson_findname(jsontree, "number", searchnode);
 
-        if (ret == 0)
+        if (ret > 0)
         {
-            if (searchnode)
-            {
-                printf("found!\n");
-                printf("%s = ", searchnode->name);
-                if (searchnode->ntype == LTJSON_STRING)
-                    printf("%s\n", searchnode->val.vstr);
-                else
-                    printf("????\n");
-            }
+            printf("found!\n");
+            printf("%s = ", searchnode[0]->name);
+            if (searchnode[0]->ntype == LTJSON_STRING)
+                printf("%s\n", searchnode[0]->val.vstr);
+            else
+                printf("????\n");
         }
-        else
+        else if (ret < 0)
         {
             printf("Search returns error\n");
             break;
         }
 
-    } while (searchnode);
+    } while (searchnode[0]);
+
+    printf("testing path refer\n");
+    ret = ltjson_pathrefer(jsontree, "/phoneNumbers[]", searchnode, 10);
+
+    printf("ltjson_pathrefer returns %d\n", ret);
+
+    if (ret > 0)
+    {
+        int i;
+
+        for (i = 0; i < ret; i++)
+        {
+            printf("-- Match --\n");
+            ltjson_display(jsontree, searchnode[i]);
+        }
+    }
+
+
+    if (dump_file("test1.txt"))
+        exit(1);
+
+    ret = ltjson_pathrefer(jsontree, "/store/book/title", searchnode, 10);
+
+    if (ret > 0)
+    {
+        int i;
+
+        for (i = 0; i < ret; i++)
+        {
+            printf("-- Match --\n");
+            ltjson_display(jsontree, searchnode[i]);
+        }
+    }
+
 
     ret = ltjson_free(&jsontree);
     printf("return from free = %s\n", strerror(-ret));

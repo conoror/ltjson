@@ -32,7 +32,7 @@
 #define LTJSON_BLANKNAMEOFF     1
 
 
-typedef struct ltjson_info {
+typedef struct {
 
     ltjson_node_t rootnode;     /* Root node of tree (not a pointer) */
 
@@ -798,6 +798,7 @@ static int process_json_alnum(ltjson_info_t *jsoninfo, unsigned char **textp,
 
 #include "ltparse.c"
 #include "ltutils.c"
+#include "ltpath.c"
 
 
 /* vi:set expandtab ts=4 sw=4: */

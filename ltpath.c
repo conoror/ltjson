@@ -7,7 +7,7 @@
  *  Distribution and use of this software are as per the terms of the
  *  Simplified BSD License (also known as the "2-Clause License")
  *
- *  Copyright 2015 Conor F. O'Rourke. All rights reserved.
+ *  Copyright 2016 Conor F. O'Rourke. All rights reserved.
  */
 
 
@@ -17,25 +17,24 @@
 typedef struct {
     const char *name;   /* Pointer to name (not null terminated) */
     int namelen;        /* Name length (can be zero) */
-    int hasindex;       /* If this section has an index */
-    int aindex;         /* The index (1 based. 0 is "*") */
+    int hasindex;       /* If this section specifies an index */
+    int aindex;         /* The index (0 based. -1 means "*") */
 } ltjson_rpath_t;
 
 
 /*
  *  path_tokenise(path, rstore, rsize) - break path into sections
  *
- *  Break up referencing path which in this format:
- *          /phoneNumbers/type
- *          /phoneNumbers[1]/type
- *          /[3]/store/book
- *  into parts and store into rstore to a max of rsize. Every item
- *  has a valid name (although namelen can be zero) - the last item
- *  has name = 0 to terminate the list.
+ *  Break up referencing path into parts and store into rstore to a
+ *  max of rsize. Every item has a valid name (although namelen can be
+ *  zero if there is no name per se - eg: for arrays). The last item
+ *  has name = NULL which terminates the list.
  *
- *  Returns the number of sections stored or 0 if path is just "/"
- *     or -EINVAL on bad params, -ERANGE if path too long,
- *        -EILSEQ if path isn't formatted correctly
+ *  Returns: the number of sections stored or 0 if path is just "/"
+ *           On error returns -1 and sets errno to:
+ *              EINVAL on bad params
+ *              ERANGE if path too long
+ *              EILSEQ if path isn't formatted correctly
  */
 
 static int path_tokenise(const char *path, ltjson_rpath_t *rstore, int rsize)
@@ -44,10 +43,16 @@ static int path_tokenise(const char *path, ltjson_rpath_t *rstore, int rsize)
     int rnum;
 
     if (!path || !rstore || rsize <= 0)
-        return -EINVAL;
+    {
+        errno = EINVAL;
+        return -1;
+    }
 
     if (*path != '/')
-        return -EILSEQ;
+    {
+        errno = EILSEQ;
+        return -1;
+    }
 
     curp = path + 1;
 
@@ -60,12 +65,15 @@ static int path_tokenise(const char *path, ltjson_rpath_t *rstore, int rsize)
         }
 
         if (*curp == '/')
-            return -EILSEQ;
+        {
+            errno = EILSEQ;
+            return -1;
+        }
 
         rstore[rnum].name = curp;
         rstore[rnum].namelen = 0;
         rstore[rnum].hasindex = 0;
-        rstore[rnum].aindex = 0;
+        rstore[rnum].aindex = -1;
 
         while (*curp != '\0' && *curp != '[' && *curp != '/')
         {
@@ -103,7 +111,10 @@ static int path_tokenise(const char *path, ltjson_rpath_t *rstore, int rsize)
             errno = 0;
             l = strtol(curp, &endptr, 10);
             if (errno || *endptr != ']' || l < 0)
-                return -EILSEQ;
+            {
+                errno = EILSEQ;
+                return -1;
+            }
 
             rstore[rnum].aindex = (int)l;
             curp = endptr + 1;
@@ -112,13 +123,74 @@ static int path_tokenise(const char *path, ltjson_rpath_t *rstore, int rsize)
         if (*curp)
         {
             if (*curp != '/')
-                return -EILSEQ;
+            {
+                errno = EILSEQ;
+                return -1;
+            }
             curp++;
         }
 
     }   /* for (rnum...) */
 
-    return -ERANGE;
+    errno = ERANGE;
+    return -1;
+}
+
+
+
+
+/*
+ *  path_hashify_rpath(jsoninfo, refpaths) - Convert name refpath to hashes
+ *
+ *  If the json tree is hashed, convert any names in the referencing path
+ *  list refpaths (which is terminated by name == 0) to hash references.
+ *  Mark each hash reference by making namelen equal -1.
+ *
+ *  Returns: 1 on success, which includes the tree having no hash
+ *           0 if any name in the refpaths list does not have a hash
+ */
+
+static int path_hashify_rpath(ltjson_info_t *jsoninfo,
+                              ltjson_rpath_t *refpaths)
+{
+    struct nhashcell *nhcp;
+    unsigned long hashval;
+    const char *hashname;
+
+    if (!jsoninfo->nhtab)
+        return 1;
+
+    while (refpaths->name != NULL)
+    {
+        if (refpaths->namelen == 0)
+        {
+            refpaths++;
+            continue;
+        }
+
+        hashval =
+            djbnhash(refpaths->name, refpaths->namelen) % NHASH_NBUCKETS;
+
+        hashname = 0;
+
+        for (nhcp = jsoninfo->nhtab[hashval]; nhcp; nhcp = nhcp->next)
+        {
+            if (strncmp(refpaths->name, nhcp->s, refpaths->namelen) == 0)
+            {
+                hashname = nhcp->s;
+                break;
+            }
+        }
+
+        if (!hashname)
+            return 0;
+
+        refpaths->name = hashname;
+        refpaths->namelen = -1;
+        refpaths++;
+    }
+
+    return 1;
 }
 
 
@@ -138,8 +210,8 @@ static int path_tokenise(const char *path, ltjson_rpath_t *rstore, int rsize)
  *  Returns the number of matches found (whether stored or not)
  */
 
-int path_getobject(ltjson_node_t *atnode, ltjson_rpath_t *refpath,
-                   ltjson_node_t ***nodestorep, int *storeavail)
+static int path_getobject(ltjson_node_t *atnode, ltjson_rpath_t *refpath,
+                          ltjson_node_t ***nodestorep, int *storeavail)
 {
     int thisindex, nfound;
 
@@ -157,19 +229,19 @@ int path_getobject(ltjson_node_t *atnode, ltjson_rpath_t *refpath,
         return 1;
     }
 
-    /* The current node (atnode) is the last match. To find the
-       next match, atnode must be an object or an array. Any
-       matches will be entries under atnode */
+    /* NB: The current node (atnode) is the last match. To find
+       the next match, atnode must be an object or an array.
+       Any new matches will then be entries under atnode */
 
     switch (atnode->ntype)
     {
-        case LTJSON_OBJECT:
-            if (!refpath->namelen)
+        case LTJSON_NTYPE_OBJECT:
+            if (!refpath->namelen)      /* No name given */
                 return 0;
         break;
 
-        case LTJSON_ARRAY:
-            if (refpath->namelen)
+        case LTJSON_NTYPE_ARRAY:
+            if (refpath->namelen)       /* Name given */
                 return 0;
         break;
 
@@ -177,19 +249,20 @@ int path_getobject(ltjson_node_t *atnode, ltjson_rpath_t *refpath,
             return 0;
     }
 
-    if (atnode->ntype == LTJSON_OBJECT)
+    if (atnode->ntype == LTJSON_NTYPE_OBJECT)
     {
         atnode = atnode->val.subnode;
-
-        if (atnode->ntype == LTJSON_EMPTY)
+        if (!atnode)
             return 0;
 
         do {
-            if (strlen((char *)atnode->name) != refpath->namelen)
-                continue;
-
-            if (strncmp((char *)atnode->name, refpath->name,
-                        refpath->namelen) == 0)
+            if (refpath->namelen < 0)       /* Hash */
+            {
+                if (refpath->name == atnode->name)      /* Compare pointers */
+                    break;
+            }
+            else if (strncmp(atnode->name, refpath->name,
+                                           refpath->namelen) == 0)
             {
                 /* found */
                 break;
@@ -197,14 +270,16 @@ int path_getobject(ltjson_node_t *atnode, ltjson_rpath_t *refpath,
 
         } while ((atnode = atnode->next) != NULL);
 
-        if (atnode == NULL)
+        if (!atnode)
             return 0;
 
-        /* Match! - there will only ever be one match in an object */
 
-        if (atnode->ntype != LTJSON_ARRAY)
+        /* Match! - there will only ever be one match in an object
+           atnode is now pointing to that singular match */
+
+        if (atnode->ntype != LTJSON_NTYPE_ARRAY)
         {
-            /* item is not an array. Cannot have indexes: */
+            /* item is not an array => cannot have indexes: */
 
             if (refpath->hasindex)
                 return 0;
@@ -215,38 +290,29 @@ int path_getobject(ltjson_node_t *atnode, ltjson_rpath_t *refpath,
                                   nodestorep, storeavail);
         }
 
-        /* Item is an array. If index is not specified, treat this the same
-           as specifing all indexes, except when the item is the last in
-           the search spec (we want the item, not its subitems: */
+        /* Item is an array. If index is not specified the default aindex
+           value (-1) will specify all indexes. If the item is the last in
+           the search spec, we want the item itself, NOT every subitem! */
 
-        if (!refpath->hasindex)
+        if (!refpath->hasindex && refpath[1].name == NULL)
         {
-            if (refpath[1].name == NULL)
-            {
-                return path_getobject(atnode, refpath + 1,
-                                      nodestorep, storeavail);
-            }
-
-            refpath->hasindex = 1;
-            refpath->aindex = 0;
+            return path_getobject(atnode, refpath + 1, nodestorep, storeavail);
         }
     }
 
-    assert(atnode->ntype == LTJSON_ARRAY);
+    assert(atnode->ntype == LTJSON_NTYPE_ARRAY);
 
     /* Array searching. Can drop through from the object search... */
 
     atnode = atnode->val.subnode;
-    if (atnode->ntype == LTJSON_EMPTY)
+    if (!atnode)
         return 0;
 
     thisindex = 0;
     nfound = 0;
 
     do {
-        thisindex++;
-
-        if (refpath->aindex && refpath->aindex != thisindex)
+        if (refpath->aindex >= 0 && refpath->aindex != thisindex++)
             continue;
 
         /* Array match (or all of them) */
@@ -271,27 +337,40 @@ int path_getobject(ltjson_node_t *atnode, ltjson_rpath_t *refpath,
  *  Search the tree for the items specified in path and store any matches
  *  found into the @nodeptr node array up to a max of @nnodes.
  *
- *  Returns:    Number of matches found (not stored) on success or
- *              -EINVAL if tree is not valid, closed or finalised
- *              -EILSEQ if path expression is not understood
- *              -ERANGE if path is too long
+ *  The reference path is an expression that must start with a / to
+ *  represent the root, followed by / separated object or array
+ *  references. Use [] to represent array offsets:
+ *          /phoneNumbers/type
+ *          /phoneNumbers[1]/type
+ *          /[3]/store/book
+ *  An array offset can be left out or represented by [] or [*] to
+ *  denote "all elements" in the array. The offset is 0 based.
+ *  If an array is last item in a path, the array is returned, not
+ *  all the elements of the array (as for other parts of the path).
+ *
+ *  Returns: Number of matches found (not stored) on success or
+ *           0 on failure and, if an error, sets errno to one of
+ *              EINVAL if tree is not valid, closed or finalised
+ *              EILSEQ if path expression is not understood
+ *              ERANGE if path is too long
  */
 
 int ltjson_pathrefer(ltjson_node_t *tree, const char *path,
                      ltjson_node_t **nodeptr, int nnodes)
 {
+    ltjson_info_t *jsoninfo;
     ltjson_rpath_t refpaths[8];
     int ret;
 
-    if (!tree || !path || !nodeptr || nnodes <= 0)
-        return -EINVAL;
-
-    if (!is_closed_tree(tree))
-        return -EINVAL;
+    if (!path || !nodeptr || nnodes <= 0 || !is_closed_tree(tree))
+    {
+        errno = EINVAL;
+        return 0;
+    }
 
     ret = path_tokenise(path, refpaths, sizeof(refpaths)/sizeof(refpaths[0]));
     if (ret < 0)
-        return ret;
+        return 0;
 
     if (ret == 0)
     {
@@ -299,7 +378,22 @@ int ltjson_pathrefer(ltjson_node_t *tree, const char *path,
         return 1;
     }
 
-    return path_getobject(tree, refpaths, &nodeptr, &nnodes);
+    /* If hashes are available, use them */
+
+    jsoninfo = (ltjson_info_t *)tree;
+
+    if (!path_hashify_rpath(jsoninfo, refpaths))
+    {
+        /* Failure to hash a name means it can never be found! */
+        errno = 0;
+        return 0;
+    }
+
+    ret = path_getobject(tree, refpaths, &nodeptr, &nnodes);
+    if (!ret)
+        errno = 0;
+
+    return ret;
 }
 
 

@@ -7,7 +7,7 @@
  *  Distribution and use of this software are as per the terms of the
  *  Simplified BSD License (also known as the "2-Clause License")
  *
- *  Copyright 2015 Conor F. O'Rourke. All rights reserved.
+ *  Copyright 2016 Conor F. O'Rourke. All rights reserved.
  */
 
 #include <stdio.h>
@@ -23,49 +23,39 @@
 
 #define _LTJSON_INLINE_INCLUDE_
 
+#include "ltlocal.h"
 
 #include "lttext.c"     /* code inline include */
+#include "lthash.c"
 
 
-#define LTJSON_NODEALLOCSIZE    32
-#define LTJSON_STRINGINITSIZE   8
-#define LTJSON_BLANKNAMEOFF     1
+/* This extern can be set by the caller to change the number of
+   basenodes allocated every time we run out */
+
+int ltjson_allocsize_nodes;
 
 
-typedef struct {
-
-    ltjson_node_t rootnode;     /* Root node of tree (not a pointer) */
-
-    ltjson_node_t *root;        /* Root of tree (pointer to above)   */
-    ltjson_node_t *open;        /* Tree open? This is current node   */
-    ltjson_node_t *cbasenode;   /* Current basenode                  */
-
-    const char *lasterr;        /* 0 or description of error         */
-    unsigned int fparse;        /* Floating point parsing rules      */
-    int incomplete;             /* If !0, continue adding to string  */
-
-    int salloc;                 /* bytes allocated in sstore pointer */
-    int sused;                  /* Number used in sstore             */
-    unsigned char *sstore;      /* Pointer to string storage alloc   */
-
-} ltjson_info_t;
 
 
 /*  Memory layout
     -------------
 
-    Base nodes hold the storage for the nodes. Each base node links to
-    the next with .next. The last base node allocated has .next linked
-    to the first allocated, thus it's a ring buffer. All base nodes also
-    have a pointer to the first node in .ancnode. If there's only one
-    base node, it points to itself.
+    The storage for the json nodes is allocated in sets (set by
+    jsoninfo->nodeasize) with the first node in the set denoted the
+    "basenode". This node uses the same structure as a normal node
+    so it overlays node usage information into that structure:
 
-    A tree can be recycled by simply setting the base node nused entries
-    to 1. The get_new_node function will reuse them.
+        [bn] -> [bn] -> [bn] -> [bn] -+
+         ^----------------------------+
 
-    All strings are stored as offsets, not pointers, as the store can
-    be moved in memory. The strings are converted to pointers when the
-    tree is completed.
+    each bn links to the next with .next in a ring buffer format. Each
+    links to the head bn with .ancnode. We can always get to the head
+    and we always know when we're out of storage (.next is .ancnode).
+    If there's only one bn, it will point to itself.
+
+    The nodes can be recycled by simply setting the base node .nused
+    entries to 1 and moving the current bn to the head.
+    The get_new_node() function will reuse them.
 
     Store reuse is allowed by passing a valid initial tree pointer with
     no continuation set. If you want to stop a continuation pass a NULL
@@ -85,48 +75,62 @@ typedef struct {
  *  create_tree(jsoninfo) - Creates info structures for the json tree
  *
  *  The JSON info root is default created with no base node allocations
- *  but a small initial string store (so two allocations).
  *
  *  If jsoninfo is passed as non-NULL, the tree is simply recycled and
- *  memory is set to be reused.
+ *  all memories (including sstore and hashes) are set to be reused.
  *
- *  Returns: pointer to jsoninfo or NULL if out of memory
+ *  Returns: pointer to jsoninfo on success
+ *           NULL if out of memory (errno to ENOMEM)
  */
 
 static ltjson_info_t *create_tree(ltjson_info_t *jsoninfo)
 {
-    static const char *sblank = " Blank";
-    int i;
-
     if (jsoninfo == NULL)
     {
         jsoninfo = malloc(sizeof(ltjson_info_t));
         if (!jsoninfo)
-            return NULL;
-
-        jsoninfo->sstore = malloc(LTJSON_STRINGINITSIZE);
-        if (!jsoninfo->sstore)
         {
-            free(jsoninfo);
+            errno = ENOMEM;
             return NULL;
         }
 
-        jsoninfo->salloc    = LTJSON_STRINGINITSIZE;
+        jsoninfo->sstore    = sstore_new();
+        jsoninfo->workstr   = NULL;
+        jsoninfo->workalloc = 0;
         jsoninfo->cbasenode = 0;
+        jsoninfo->nhtab     = 0;
+        jsoninfo->nhstore   = 0;
+
+        /* And set the node allocation size once, right here */
+
+        if (!ltjson_allocsize_nodes)
+        {
+            jsoninfo->nodeasize = JSONNODE_DEF_ALLOC;
+        }
+        else
+        {
+            jsoninfo->nodeasize = ltjson_allocsize_nodes;
+            if (jsoninfo->nodeasize < JSONNODE_MIN_ALLOC)
+                jsoninfo->nodeasize = JSONNODE_MIN_ALLOC;
+        }
+
+        jsoninfo->nodeasize++;      /* for the basenode */
     }
+
 
     /* In order for an ltjson_info_t to look like an ltjson_node_t
        the first entry in the former must be the latter. And be
        initialised as per get_new_node(). Then use the root entry
        to point to that node_t (more consistent pointer usage).
 
-       .cbasenode, .sstore and .salloc will already be valid or are
-       set in the above code. Init everything else:
+       .cbasenode, .sstore, .workstr, .workalloc, .nhtab, .nhstore
+       will already be valid or are set in the above code.
+       Init everything else:
     */
 
-    jsoninfo->rootnode.name    = 0;
-    jsoninfo->rootnode.nameoff = 0;
-    jsoninfo->rootnode.ntype   = LTJSON_EMPTY;
+    jsoninfo->rootnode.name    = NULL;
+    jsoninfo->rootnode.ntype   = LTJSON_NTYPE_EMPTY;
+    jsoninfo->rootnode.nflags  = 0;
     jsoninfo->rootnode.next    = NULL;
     jsoninfo->rootnode.ancnode = NULL;
 
@@ -134,18 +138,14 @@ static ltjson_info_t *create_tree(ltjson_info_t *jsoninfo)
     jsoninfo->open = 0;
 
     jsoninfo->lasterr    = 0;
-    jsoninfo->fparse     = 0;
     jsoninfo->incomplete = 0;
 
-    /* Represent blank and zero offset strings as
-       offsets of 0 and 1 have specific meanings */
 
-    i = strlen(sblank) + 1;
-    assert(i <= jsoninfo->salloc);
+    if (jsoninfo->nhtab)
+        nhash_reset(jsoninfo);
 
-    strcpy((char *)jsoninfo->sstore, sblank);
-    jsoninfo->sused  = i;
-
+    if (jsoninfo->sstore)
+        sstore_clear(&jsoninfo->sstore);
 
     if (jsoninfo->cbasenode)
     {
@@ -186,27 +186,26 @@ static void destroy_tree(ltjson_info_t *jsoninfo)
     if (!jsoninfo)
         return;
 
-    free(jsoninfo->sstore);
+    nhash_free(jsoninfo);
+    sstore_free(&jsoninfo->sstore);
+    free(jsoninfo->workstr);
 
-    if (!jsoninfo->cbasenode)
+    if (jsoninfo->cbasenode)
     {
-        free(jsoninfo);
-        return;
+        basenode = jsoninfo->cbasenode;
+
+        /* basenodes are in a ring linked by .next. Break the
+           ring first and then traverse from head to tail */
+
+        node = basenode->next;    /* can be itself! */
+        basenode->next = NULL;
+
+        do {
+            basenode = node;
+            node = basenode->next;
+            free(basenode);
+        } while (node != NULL);
     }
-
-    basenode = jsoninfo->cbasenode;
-
-    /* basenodes are in a ring linked by .next. Break the
-       ring first and then traverse from head to tail */
-
-    node = basenode->next;    /* can be itself! */
-    basenode->next = NULL;
-
-    do {
-        basenode = node;
-        node = basenode->next;
-        free(basenode);
-    } while (node != NULL);
 
     /* finally, free the info structure itself */
 
@@ -222,7 +221,7 @@ static void destroy_tree(ltjson_info_t *jsoninfo)
  *  jsoninfo is a pointer to the json info struct and must be valid.
  *
  *  Returns: a pointer to an initialised empty new node on success
- *           NULL if out of memory (which will destroy the tree)
+ *           NULL if out of memory (errno to ENOMEM)
  */
 
 static ltjson_node_t *get_new_node(ltjson_info_t *jsoninfo)
@@ -233,32 +232,33 @@ static ltjson_node_t *get_new_node(ltjson_info_t *jsoninfo)
 
     basenode = jsoninfo->cbasenode;
 
-    if (basenode && basenode->val.nused < LTJSON_NODEALLOCSIZE)
+    if (basenode && basenode->val.nused < jsoninfo->nodeasize)
     {
         newnode = basenode + basenode->val.nused;
     }
     else
     {
-        /* current basenode is full. Check if .next points to the first node
-           (end of the ring). If it does, allocate a new basenode and insert
-           into ring. Else start using the basenode pointed to by .next
-           (ie: recycle the existing storage) */
+        /* current set of nodes is full.
+           Check if .next points to the first node (end of the ring).
+           If it does, allocate a new basenode and insert into ring.
+           Else start using the basenode pointed to by .next
+           (ie: recycle the existing storage)
+        */
 
         if (basenode == NULL || (basenode->next == basenode->ancnode))
         {
             /* Out of available buffers */
 
-            newnode = malloc(LTJSON_NODEALLOCSIZE * sizeof(ltjson_node_t));
+            newnode = malloc(jsoninfo->nodeasize * sizeof(ltjson_node_t));
             if (newnode == NULL)
             {
-                /* Tear everything down and return NULL */
-                destroy_tree(jsoninfo);
+                errno = ENOMEM;
                 return NULL;
             }
 
-            newnode->ntype     = LTJSON_BASE;
-            newnode->name      = 0;
-            newnode->nameoff   = 0;
+            newnode->name      = NULL;
+            newnode->ntype     = LTJSON_NTYPE_BASENODE;
+            newnode->nflags    = 0;
             newnode->val.nused = 1;
 
             if (basenode)
@@ -282,16 +282,14 @@ static ltjson_node_t *get_new_node(ltjson_info_t *jsoninfo)
             assert(newnode->val.nused == 1);
         }
 
-        basenode = newnode;
-        jsoninfo->cbasenode = basenode;
-        newnode++;
+        jsoninfo->cbasenode = newnode++;
     }
 
-    basenode->val.nused++;
+    jsoninfo->cbasenode->val.nused++;
 
-    newnode->name    = 0;
-    newnode->nameoff = 0;
-    newnode->ntype   = LTJSON_EMPTY;
+    newnode->name    = NULL;
+    newnode->ntype   = LTJSON_NTYPE_EMPTY;
+    newnode->nflags  = 0;
     newnode->next    = NULL;
     newnode->ancnode = NULL;
 
@@ -304,49 +302,37 @@ static ltjson_node_t *get_new_node(ltjson_info_t *jsoninfo)
 /*
  *  begin_tree(jsoninfo, firstch, curnodep) - Begin json tree with the root
  *
- *  Begin with the root of the json tree which will be an object or an array
- *  (firstch indicates which) with an initial containing blank node. The
- *  root node is included as part of the jsoninfo structure itself.
- *  On success, curnodep is updated to point to that first blank node.
+ *  Begin with the root of the json tree. This will be an object or an array
+ *  (firstch indicates which) which will be flagged as open.
+ *  The root node is included as part of the jsoninfo structure.
  *
- *  Returns: 0 on success or
- *           -ENOMEM (destroys tree); -EILSEQ (sets lasterr)
+ *  Returns: Pointer to the root node on success or
+ *           NULL if illegal input sequence (errno to EILSEQ and lasterr)
  */
 
-static int begin_tree(ltjson_info_t *jsoninfo,
-                      int firstch, ltjson_node_t **curnodep)
+static ltjson_node_t *begin_tree(ltjson_info_t *jsoninfo, int firstch)
 {
-    ltjson_node_t *newnode;
+    assert(jsoninfo);
 
     /* Make up a root node which is either an object or an array
-       (going with RFC4627 on this one). Both have no name.
+       (going with the relevant RFC on this one). Both have no name.
        root is part of jsoninfo. root has no ancestor. */
 
     if (firstch == '{')
-        jsoninfo->root->ntype = LTJSON_OBJECT;
+        jsoninfo->root->ntype = LTJSON_NTYPE_OBJECT;
     else if (firstch == '[')
-        jsoninfo->root->ntype = LTJSON_ARRAY;
+        jsoninfo->root->ntype = LTJSON_NTYPE_ARRAY;
     else
     {
-        jsoninfo->lasterr = "RFC4627 JSON starts with object or array";
-        return -EILSEQ;
+        jsoninfo->lasterr = ERR_SEQ_BEGINTREE;
+        errno = EILSEQ;
+        return NULL;
     }
 
-    /* All encounters with "{[," autocreate a blank node.
-       An array parent will cause that node to automatically
-       have an blank name assigned (not the same thing as no name) */
+    jsoninfo->root->nflags = JSONNODE_NFLAGS_OPENOA;
+    jsoninfo->root->val.subnode = NULL;
 
-    if ((newnode = get_new_node(jsoninfo)) == NULL)
-        return -ENOMEM;
-
-    jsoninfo->root->val.subnode = newnode;
-    newnode->ancnode = jsoninfo->root;
-
-    if (newnode->ancnode->ntype == LTJSON_ARRAY)
-        newnode->nameoff = LTJSON_BLANKNAMEOFF;
-
-    *curnodep = newnode;            /* curnode -> blank node */
-    return 0;
+    return jsoninfo->root;
 }
 
 
@@ -367,8 +353,12 @@ static ltjson_node_t *traverse_tree_nodes(ltjson_node_t *node)
 {
     assert(node);
 
-    if (node->ntype == LTJSON_ARRAY || node->ntype == LTJSON_OBJECT)
-        return node->val.subnode;
+    if (node->ntype == LTJSON_NTYPE_ARRAY ||
+        node->ntype == LTJSON_NTYPE_OBJECT)
+    {
+        if (node->val.subnode)
+            return node->val.subnode;
+    }
 
     if (node->next)
         return node->next;
@@ -388,83 +378,57 @@ static ltjson_node_t *traverse_tree_nodes(ltjson_node_t *node)
 
 
 /*
- *  finalise_tree(jsoninfo) - Close the tree by fixing string offsets
- */
-
-static void finalise_tree(ltjson_info_t *jsoninfo)
-{
-    ltjson_node_t *curnode;
-    int vlen;
-
-    assert(jsoninfo);
-
-    curnode = jsoninfo->root;
-
-    while (curnode)
-    {
-        if (curnode->nameoff)
-            curnode->name = jsoninfo->sstore + curnode->nameoff;
-
-        if (curnode->ntype == LTJSON_STRING)
-        {
-            vlen = curnode->val.vlen;
-            curnode->val.vstr = jsoninfo->sstore + vlen;
-        }
-
-        curnode = traverse_tree_nodes(curnode);
-    }
-}
-
-
-
-
-/*
  *  store_strnum(jsoninfo, textp) - Store text representations
  *
- *  Store a string, number or logic type representation in .sstore.
+ *  Store a string, number or logic type representation in .workstr.
  *  To distinguish between the types in a continuation (where a tree is
  *  partially updated on each call), the first character is used as a type:
- *  string: ", logic: ! and number: none. textp is moved appropriately.
+ *  string: ", logic: ! and number: none.
  *
- *  Whenever this routine is called, it may move the .sstore pointer.
+ *  Characters are taken from textp whose pointer is moved along.
  *
- *  Returns: the offset to the string in the string store on success or
- *           -ENOMEM (destroys tree); -EAGAIN on a continuation.
+ *  Warning: This routine may move the .workstr pointer.
+ *
+ *  Returns: A pointer to .workstr on success
+ *           NULL on error and sets errno to:
+ *                  ENOMEM if out of memory
+ *                  EAGAIN if out of input
  */
 
-static int store_strnum(ltjson_info_t *jsoninfo, unsigned char **textp)
+static char *store_strnum(ltjson_info_t *jsoninfo, const char **textp)
 {
-    unsigned char *s;           /* source */
-    unsigned char *d;           /* dest   */
-    int dstart;                 /* dest start offset   */
+    const char *s;
+    char *d;
+    int dlen, prev, isnum, islogic;
 
-    unsigned char prev = 0;
-    int isnum = 0, islogic = 0;
+    assert(jsoninfo && textp && *textp && **textp);
 
-    assert(textp && *textp && **textp);
+    s = *textp;                         /* Source */
+    d = jsoninfo->workstr;              /* Dest, can be 0 */
+    dlen = prev = isnum = islogic = 0;
 
-    s = *textp;
-
-    dstart = jsoninfo->sused;
-    d = jsoninfo->sstore + jsoninfo->sused;     /* Might not be valid! */
 
     if (jsoninfo->incomplete)
     {
-        /* Half finished string with the start point stored in incomplete.
-           Guaranteed to have at least one character in it and to be null
-           terminated. d set above will then be one past the \0 */
+        /* Incomplete input. d is guaranteed to have at least
+           one character and to be null terminated */
 
-        dstart = jsoninfo->incomplete;
+        assert(d && *d);
+
         jsoninfo->incomplete = 0;
 
-        d--;                        /* point at terminator */
-        jsoninfo->sused--;          /* which we discard */
-        prev = *(d - 1);
-
-        if (jsoninfo->sstore[dstart] == '!')
+        if (*d == '!')
             islogic = 1;
-        else if (jsoninfo->sstore[dstart] != '"')
+        else if (*d != '"')
             isnum = 1;
+
+        while (*d)                  /* Point at '\0' */
+        {
+            dlen++;
+            d++;
+        }
+
+        prev = *(d - 1);
     }
     else
     {
@@ -474,11 +438,11 @@ static int store_strnum(ltjson_info_t *jsoninfo, unsigned char **textp)
         {
             prev = '\\';    /* hack! */
         }
-        else if (*s == '-' || isdigit(*s))
+        else if (*s == '-' || c_isdigit(*s))
         {
             isnum = 1;
         }
-        else if (isalpha(*s))
+        else if (c_isalpha(*s))
         {
             islogic = 1;
             prev = '!';     /* Flag! */
@@ -498,29 +462,29 @@ static int store_strnum(ltjson_info_t *jsoninfo, unsigned char **textp)
     {
         /* Need enough space for one char and one terminator */
 
-        if (jsoninfo->sused >= jsoninfo->salloc - 1)
+        if (dlen + 2 > jsoninfo->workalloc)
         {
-            /* Out of storage space - realloc */
+            /* Out of storage space */
 
-            int newsize;
-            unsigned char *newstore;
+            char *newstore;
 
-            newsize  = jsoninfo->salloc * 2;
-            newstore = realloc(jsoninfo->sstore, newsize);
+            if (!jsoninfo->workalloc)
+                jsoninfo->workalloc = WORKSTR_INIT_ALLOC;
+            else
+                jsoninfo->workalloc *= 2;
 
-            if (newstore == NULL)
+            newstore = realloc(jsoninfo->workstr, jsoninfo->workalloc);
+            if (!newstore)
             {
-                destroy_tree(jsoninfo);
-                return -ENOMEM;
+                errno = ENOMEM;
+                return NULL;
             }
 
-            jsoninfo->sstore = newstore;
-            jsoninfo->salloc = newsize;
-
-            d = jsoninfo->sstore + jsoninfo->sused;    /* d may have moved */
+            jsoninfo->workstr = newstore;
+            d = newstore + dlen;
         }
 
-        /* Good for two chars! */
+        /* We're good for two chars! */
 
         if (islogic)
         {
@@ -532,16 +496,15 @@ static int store_strnum(ltjson_info_t *jsoninfo, unsigned char **textp)
 
                 prev = 0;
                 *d++ = '!';
-                jsoninfo->sused++;
+                dlen++;
                 continue;
             }
 
-            if (!isalpha(*s))
+            if (!c_isalpha(*s))
             {
                 *d = '\0';
-                jsoninfo->sused++;
                 *textp = s;
-                return dstart;
+                return jsoninfo->workstr;
             }
         }
 
@@ -550,10 +513,8 @@ static int store_strnum(ltjson_info_t *jsoninfo, unsigned char **textp)
             if (*s == '"' && prev != '\\')
             {
                 *d = '\0';
-                jsoninfo->sused++;
-
                 *textp = ++s;
-                return dstart;
+                return jsoninfo->workstr;
             }
         }
 
@@ -561,30 +522,28 @@ static int store_strnum(ltjson_info_t *jsoninfo, unsigned char **textp)
         {
             /* Allow + - . 0-9 e E and let strtod figure out validity */
 
-            if (!isdigit(*s) && *s != '-' && *s != '+' &&
-                                *s != 'e' && *s != 'E' && *s != '.')
+            if (!c_isdigit(*s) && *s != '-' && *s != '+' &&
+                                  *s != 'e' && *s != 'E' && *s != '.')
             {
                 *d = '\0';
-                jsoninfo->sused++;
-
                 *textp = s;
-                return dstart;
+                return jsoninfo->workstr;
             }
         }
 
         prev = *s;
-        jsoninfo->sused++;
         *d++ = *s++;
+        dlen++;
     }
 
-    /* Run out of string */
+    /* We've run out of input */
 
     *d = '\0';
-    jsoninfo->sused++;
-    jsoninfo->incomplete = dstart;  /* Flag continuation */
-
+    jsoninfo->incomplete = 1;
     *textp = s;
-    return -EAGAIN;
+
+    errno = EAGAIN;
+    return NULL;
 }
 
 
@@ -596,44 +555,44 @@ static int store_strnum(ltjson_info_t *jsoninfo, unsigned char **textp)
  *  Convert the string numstr to an integer or float and store the result
  *  in the appropriate section in node.
  *
- *  Returns 0 on success or -EINVAL on conversion error
+ *  Returns 1 on success or 0 on conversion error
  */
 
-static int convert_to_number(unsigned char *numstr, ltjson_node_t *node)
+static int convert_to_number(const char *numstr, ltjson_node_t *node)
 {
     char *endptr;
     double dval;
-    long lval;
+    long long llval;
 
-    assert(isdigit(*numstr) || *numstr == '-');
+    assert(c_isdigit(*numstr) || *numstr == '-');
 
     /* Check for leading zeros which aren't strictly valid */
 
     if (numstr[0] == '-' && numstr[1] == '0' && numstr[2] != '.')
-        return -EINVAL;
+        return 0;
     if (numstr[0] == '0' && numstr[1] != '.' && numstr[1] != '\0')
-        return -EINVAL;
+        return 0;
 
-    if (strpbrk((char *)numstr, "eE."))
+    if (strpbrk(numstr, "eE."))
     {
         errno = 0;
-        dval = strtod((char *)numstr, &endptr);
+        dval = strtod(numstr, &endptr);
         if (errno || *endptr)
-            return -EINVAL;
-        node->ntype = LTJSON_DOUBLE;
+            return 0;
+        node->ntype = LTJSON_NTYPE_FLOAT;
         node->val.d = dval;
     }
     else
     {
         errno = 0;
-        lval = strtol((char *)numstr, &endptr, 10);
+        llval = strtoll(numstr, &endptr, 10);
         if (errno || *endptr)
-            return -EINVAL;
-        node->ntype = LTJSON_INTEGER;
-        node->val.l = lval;
+            return 0;
+        node->ntype = LTJSON_NTYPE_INTEGER;
+        node->val.ll = llval;
     }
 
-    return 0;
+    return 1;
 }
 
 
@@ -646,34 +605,34 @@ static int convert_to_number(unsigned char *numstr, ltjson_node_t *node)
  *  in the appropriate section in node.
  *  The string must have a leading '!' (placed by store_strnum).
  *
- *  Returns 0 on success or -EINVAL on conversion error
+ *  Returns 1 on success or 0 on conversion error
  */
 
-static int convert_to_logic(unsigned char *logstr, ltjson_node_t *node)
+static int convert_to_logic(const char *logstr, ltjson_node_t *node)
 {
     assert(*logstr == '!');
     logstr++;
 
-    if (strcasecmp((char *)logstr, "null") == 0)
+    if (strcasecmp(logstr, "null") == 0)
     {
-        node->ntype = LTJSON_NULL;
+        node->ntype = LTJSON_NTYPE_NULL;
     }
-    else if (strcasecmp((char *)logstr, "true") == 0)
+    else if (strcasecmp(logstr, "true") == 0)
     {
-        node->ntype = LTJSON_BOOL;
-        node->val.l = 1;
+        node->ntype = LTJSON_NTYPE_BOOL;
+        node->val.ll = 1;
     }
-    else if (strcasecmp((char *)logstr, "false") == 0)
+    else if (strcasecmp(logstr, "false") == 0)
     {
-        node->ntype = LTJSON_BOOL;
-        node->val.l = 0;
+        node->ntype = LTJSON_NTYPE_BOOL;
+        node->val.ll = 0;
     }
     else
     {
-        return -EINVAL;
+        return 0;
     }
 
-    return 0;
+    return 1;
 }
 
 
@@ -684,109 +643,140 @@ static int convert_to_logic(unsigned char *logstr, ltjson_node_t *node)
  *
  *  Process a string ("string") a number (-0.12e2) or a logical (true)
  *  entity pointed to by textp into node. This moves *textp and may move
- *  the string store pointer (jsoninfo->sstore).
- *  Continuations (partial text updated) are allowed.
+ *  the working store (jsoninfo->workstr).
  *
- *  Returns: 0 on complete node fill
- *           1 if just the node name is filled (and ": value" is needed)
- *           -ENOMEM (destroys tree); -EILSEQ (sets lasterr);
- *                                    -EAGAIN on a continuation.
+ *  Continuations (partial text updates) are allowed.
+ *
+ *  Returns: 1 on complete or partial (value still needed) node fill
+ *           0 on error on continuation with errno set to:
+ *                  ENOMEM (Out of memory)
+ *                  EILSEQ (Bad sequence, sets lasterr)
+ *                  EAGAIN (Out of input)
  */
 
-static int process_json_alnum(ltjson_info_t *jsoninfo, unsigned char **textp,
+static int process_json_alnum(ltjson_info_t *jsoninfo, const char **textp,
                               ltjson_node_t *node)
 {
-    int firstch, soff;
+    int firstch;
 
     firstch = **textp;
     assert(firstch);
 
     if (jsoninfo->incomplete)
-        firstch = *(jsoninfo->sstore + jsoninfo->incomplete);
-
+        firstch = *jsoninfo->workstr;
 
     if (firstch == '"')                             /* String */
     {
-        int ntrimmed;
+        const char *nvstr;
 
-        if (node->ntype != LTJSON_EMPTY)
+        if (node->ntype != LTJSON_NTYPE_EMPTY)
         {
-            jsoninfo->lasterr = "Unexpected string (missing comma?)";
-            return -EILSEQ;
-        }
-
-        soff = store_strnum(jsoninfo, textp);
-        if (soff < 0)
-            return soff;
-
-        ntrimmed = unescape_string(jsoninfo->sstore + soff);
-        if (ntrimmed < 0)
-        {
-            jsoninfo->lasterr = "Cannot decode escapes in string";
-            return -EILSEQ;
-        }
-
-        /* Trim down the sstore by the number trimmed by unescape_string: */
-
-        jsoninfo->sused -= ntrimmed;
-
-        if (node->nameoff)
-        {
-            node->ntype = LTJSON_STRING;
-            node->val.vlen = soff;
+            jsoninfo->lasterr = ERR_SEQ_UNEXPSTR;
+            errno = EILSEQ;
             return 0;
         }
 
-        node->nameoff = soff;
+        if (!store_strnum(jsoninfo, textp))     /* Sets errno */
+            return 0;
+
+        if (!unescape_string(jsoninfo->workstr))
+        {
+            jsoninfo->lasterr = ERR_SEQ_BADESCAPE;
+            errno = EILSEQ;
+            return 0;
+        }
+
+
+        if (node->name || node->ancnode->ntype == LTJSON_NTYPE_ARRAY)
+        {
+            /* Name already set (if object) or no name (if array).
+               Store the string, don't try and hash it */
+
+            nvstr = sstore_add(&jsoninfo->sstore, jsoninfo->workstr + 1);
+            if (!nvstr)
+                return 0;
+
+            node->ntype = LTJSON_NTYPE_STRING;
+            node->val.s = nvstr;
+            return 1;
+        }
+
+        /* Set the name part in an object. Hashing is available for this.
+           Mark the node as looking for the colon (name : value) */
+
+        nvstr = nhash_insert(jsoninfo, jsoninfo->workstr + 1);
+        if (!nvstr)
+            return 0;
+
+        node->name = nvstr;
+        node->nflags = JSONNODE_NFLAGS_COLON;
+
         return 1;
     }
 
-    else if (firstch == '-' || isdigit(firstch))    /* Number */
+
+    else if (firstch == '-' || c_isdigit(firstch))    /* Number */
     {
-        if (node->ntype != LTJSON_EMPTY || !node->nameoff)
+        if (node->ntype != LTJSON_NTYPE_EMPTY)
         {
-            jsoninfo->lasterr = "Unexpected number (missing name or comma)";
-            return -EILSEQ;
+            jsoninfo->lasterr = ERR_SEQ_UNEXPNUM;
+            errno = EILSEQ;
+            return 0;
         }
 
-        soff = store_strnum(jsoninfo, textp);
-        if (soff < 0)
-            return soff;
-
-        if (convert_to_number(jsoninfo->sstore + soff, node) != 0)
+        if (!node->name && node->ancnode->ntype == LTJSON_NTYPE_OBJECT)
         {
-            jsoninfo->lasterr = "Cannot convert number representation";
-            return -EILSEQ;
+            jsoninfo->lasterr = ERR_SEQ_OBJNONAME;
+            errno = EILSEQ;
+            return 0;
         }
 
-        jsoninfo->sused = soff;     /* Discard string representation */
-        return 0;
+        if (!store_strnum(jsoninfo, textp))
+            return 0;
+
+        if (!convert_to_number(jsoninfo->workstr, node))
+        {
+            jsoninfo->lasterr = ERR_SEQ_BADNUMBER;
+            errno = EILSEQ;
+            return 0;
+        }
+
+        return 1;
     }
 
-    else if (firstch == '!' || isalpha(firstch))    /* Logic */
+
+    else if (firstch == '!' || c_isalpha(firstch))    /* Logic */
     {
-        if (node->ntype != LTJSON_EMPTY || !node->nameoff)
+        if (node->ntype != LTJSON_NTYPE_EMPTY)
         {
-            jsoninfo->lasterr = "Unexpected non-string text";
-            return -EILSEQ;
+            jsoninfo->lasterr = ERR_SEQ_UNEXPTXT;
+            errno = EILSEQ;
+            return 0;
         }
 
-        soff = store_strnum(jsoninfo, textp);
-        if (soff < 0)
-            return soff;
-
-        if (convert_to_logic(jsoninfo->sstore + soff, node) != 0)
+        if (!node->name && node->ancnode->ntype == LTJSON_NTYPE_OBJECT)
         {
-            jsoninfo->lasterr = "Cannot convert logic representation";
-            return -EILSEQ;
+            jsoninfo->lasterr = ERR_SEQ_OBJNONAME;
+            errno = EILSEQ;
+            return 0;
         }
 
-        jsoninfo->sused = soff;     /* Discard string representation */
-        return 0;
+        if (!store_strnum(jsoninfo, textp))
+            return 0;
+
+        if (!convert_to_logic(jsoninfo->workstr, node))
+        {
+            jsoninfo->lasterr = ERR_SEQ_BADROBOT;
+            errno = EILSEQ;
+            return 0;
+        }
+
+        return 1;
     }
 
-    jsoninfo->lasterr = "Internal parsing error (report bug)";
-    return -EILSEQ;
+    jsoninfo->lasterr = ERR_INT_INTERNAL;
+    errno = EILSEQ;
+    return 0;
 }
 
 

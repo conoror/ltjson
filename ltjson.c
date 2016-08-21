@@ -339,17 +339,20 @@ static ltjson_node_t *begin_tree(ltjson_info_t *jsoninfo, int firstch)
 
 
 /*
- *  traverse_tree_nodes(node) - Helper to traverse the JSON tree
+ *  traverse_tree_nodes(node, rnode) - Helper to traverse the JSON tree
  *
- *  Taking a point in the tree given by node, find the next valid
- *  node down/next/up in the tree. Repeated calling will traverse
- *  the JSON tree like a directory tree. This is a helper routine
- *  - there is no error checking other than assert.
+ *  Taking a point in the tree given by node, find the next valid node
+ *  down/next/up in the tree. The optional rnode restricts the search
+ *  to the subtree anchored at rnode. Repeated calling will traverse
+ *  the JSON tree like a directory tree.
+ *
+ *  This is a helper routine - there is no error checking except assert.
  *
  *  Returns the next node or NULL if there are no more nodes.
  */
 
-static ltjson_node_t *traverse_tree_nodes(ltjson_node_t *node)
+static ltjson_node_t *traverse_tree_nodes(ltjson_node_t *node,
+                                          ltjson_node_t *rnode)
 {
     assert(node);
 
@@ -358,6 +361,9 @@ static ltjson_node_t *traverse_tree_nodes(ltjson_node_t *node)
     {
         if (node->val.subnode)
             return node->val.subnode;
+
+        if (rnode && node == rnode)
+            return NULL;
     }
 
     if (node->next)
@@ -367,6 +373,9 @@ static ltjson_node_t *traverse_tree_nodes(ltjson_node_t *node)
 
     while ((node = node->ancnode) != NULL)
     {
+        if (rnode && node == rnode)
+            return NULL;
+
         if (node->next)
             return node->next;
     }
@@ -689,8 +698,8 @@ static int process_json_alnum(ltjson_info_t *jsoninfo, const char **textp,
 
         if (node->name || node->ancnode->ntype == LTJSON_NTYPE_ARRAY)
         {
-            /* Name already set (if object) or no name (if array).
-               Store the string, don't try and hash it */
+            /* Name already set (if object member) or no name (if
+               array element). Store the string, don't hash it */
 
             nvstr = sstore_add(&jsoninfo->sstore, jsoninfo->workstr + 1);
             if (!nvstr)
@@ -701,8 +710,8 @@ static int process_json_alnum(ltjson_info_t *jsoninfo, const char **textp,
             return 1;
         }
 
-        /* Set the name part in an object. Hashing is available for this.
-           Mark the node as looking for the colon (name : value) */
+        /* Set the name part of an object member. Hashing available for
+           this. Mark the node as looking for the colon (name : value) */
 
         nvstr = nhash_insert(jsoninfo, jsoninfo->workstr + 1);
         if (!nvstr)
@@ -789,6 +798,7 @@ static int process_json_alnum(ltjson_info_t *jsoninfo, const char **textp,
 #include "ltparse.c"
 #include "ltutils.c"
 #include "ltpath.c"
+#include "ltsort.c"
 
 
 /* vi:set expandtab ts=4 sw=4: */

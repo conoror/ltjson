@@ -49,7 +49,7 @@
 #define WORKSTR_INIT_ALLOC      32
 
 #define NHASH_NBUCKETS          512
-#define NHASH_CELL_ALLOC        128
+#define NHASH_CELL_ALLOC        64
 #define NHASH_CELL_LINKCUR      (NHASH_CELL_ALLOC + 0)
 #define NHASH_CELL_LINKNEXT     (NHASH_CELL_LINKCUR + 1)
 
@@ -70,6 +70,9 @@ struct sstore
     struct sstore *next;
     struct sstore *prev;
 };
+
+
+static const char *ltjson_empty_name = "";      /* Special "" entry */
 
 
 /* ltjson info structure, includes the root node at offset zero */
@@ -137,7 +140,7 @@ static const char *ltjson_errordesc[] =
     "Unexpected string (missing comma?)",
     "Cannot decode an escape in string",
     "Unexpected number (missing comma?)",
-    "Object entry with no name",
+    "Object member has no name",
     "Cannot convert number representation",
     "Unexpected non-string text",
     "Cannot convert logic representation",

@@ -285,7 +285,7 @@ static int nhash_stats(ltjson_info_t *jsoninfo,
  *  sstore and to the hash table and return the new string.
  *
  *  Safe to call if no hashtable exists as it just adds the string to the
- *  string store.
+ *  string store. Adding a blank string ("") just returns a static pointer.
  *
  *  Returns: Pointer to new or existing string on success
  *           NULL on error and sets errno (ENOMEM)
@@ -293,15 +293,13 @@ static int nhash_stats(ltjson_info_t *jsoninfo,
 
 static const char *nhash_insert(ltjson_info_t *jsoninfo, const char *s)
 {
-    static const char *strempty = "";
     struct nhashcell *nhcp;
     unsigned long hashval;
 
     assert(jsoninfo && s);
 
     if (!*s)
-        return strempty;
-
+        return ltjson_empty_name;
 
     if (!jsoninfo->nhtab || !jsoninfo->nhstore)
     {
@@ -314,7 +312,6 @@ static const char *nhash_insert(ltjson_info_t *jsoninfo, const char *s)
 
         return nvstr;
     }
-
 
     hashval = djbhash(s) % NHASH_NBUCKETS;
 
@@ -354,6 +351,45 @@ static const char *nhash_insert(ltjson_info_t *jsoninfo, const char *s)
     jsoninfo->nhtab[hashval] = nhcp;
 
     return nhcp->s;
+}
+
+
+
+
+/*
+ *  nhash_lookup(jsoninfo, s) - Lookup string in hash table
+ *
+ *  Returns: Pointer to constant string on success
+ *           NULL if not found with errno set to 0
+ *           NULL if no hash table with errno set to ENOENT
+ */
+
+static const char *nhash_lookup(ltjson_info_t *jsoninfo, const char *s)
+{
+    struct nhashcell *nhcp;
+    unsigned long hashval;
+
+    assert(jsoninfo && s);
+
+    if (!*s)
+        return ltjson_empty_name;
+
+    if (!jsoninfo->nhtab)
+    {
+        errno = ENOENT;
+        return NULL;
+    }
+
+    hashval = djbhash(s) % NHASH_NBUCKETS;
+
+    for (nhcp = jsoninfo->nhtab[hashval]; nhcp != NULL; nhcp = nhcp->next)
+    {
+        if (strcmp(s, nhcp->s) == 0)
+            return nhcp->s;
+    }
+
+    errno = 0;
+    return NULL;
 }
 
 

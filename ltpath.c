@@ -168,6 +168,15 @@ static int path_hashify_rpath(ltjson_info_t *jsoninfo,
             continue;
         }
 
+        if ((unsigned char)*refpaths->name == 0xFF)
+        {
+            /* Special handling to allow blank namings */
+            refpaths->name = ltjson_empty_name;
+            refpaths->namelen = -1;
+            refpaths++;
+            continue;
+        }
+
         hashval =
             djbnhash(refpaths->name, refpaths->namelen) % NHASH_NBUCKETS;
 
@@ -197,7 +206,7 @@ static int path_hashify_rpath(ltjson_info_t *jsoninfo,
 
 
 /*
- *  path_getobject(atnode, refpath, nodestorep, storeavail) - get object
+ *  path_finditem(atnode, refpath, nodestorep, storeavail) - get item
  *
  *  Search the list of subnodes whose ancestor is atnode for the item
  *  referred to in (the null terminated list) refpath and, if space
@@ -210,8 +219,8 @@ static int path_hashify_rpath(ltjson_info_t *jsoninfo,
  *  Returns the number of matches found (whether stored or not)
  */
 
-static int path_getobject(ltjson_node_t *atnode, ltjson_rpath_t *refpath,
-                          ltjson_node_t ***nodestorep, int *storeavail)
+static int path_finditem(ltjson_node_t *atnode, ltjson_rpath_t *refpath,
+                         ltjson_node_t ***nodestorep, int *storeavail)
 {
     int thisindex, nfound;
 
@@ -256,9 +265,16 @@ static int path_getobject(ltjson_node_t *atnode, ltjson_rpath_t *refpath,
             return 0;
 
         do {
-            if (refpath->namelen < 0)       /* Hash */
+            if (refpath->namelen < 0)
             {
-                if (refpath->name == atnode->name)      /* Compare pointers */
+                /* Hash: Just compare pointers */
+                if (refpath->name == atnode->name)
+                    break;
+            }
+            else if ((unsigned char)*refpath->name == 0xFF)
+            {
+                /* Special handling for a "" search */
+                if (*atnode->name == '\0')
                     break;
             }
             else if (strncmp(atnode->name, refpath->name,
@@ -284,10 +300,10 @@ static int path_getobject(ltjson_node_t *atnode, ltjson_rpath_t *refpath,
             if (refpath->hasindex)
                 return 0;
 
-            /* object or other item: recurse to next match and finish: */
+            /* Any other item: recurse to next match and finish: */
 
-            return path_getobject(atnode, refpath + 1,
-                                  nodestorep, storeavail);
+            return path_finditem(atnode, refpath + 1,
+                                 nodestorep, storeavail);
         }
 
         /* Item is an array. If index is not specified the default aindex
@@ -296,7 +312,7 @@ static int path_getobject(ltjson_node_t *atnode, ltjson_rpath_t *refpath,
 
         if (!refpath->hasindex && refpath[1].name == NULL)
         {
-            return path_getobject(atnode, refpath + 1, nodestorep, storeavail);
+            return path_finditem(atnode, refpath + 1, nodestorep, storeavail);
         }
     }
 
@@ -317,7 +333,7 @@ static int path_getobject(ltjson_node_t *atnode, ltjson_rpath_t *refpath,
 
         /* Array match (or all of them) */
 
-        nfound += path_getobject(atnode, refpath + 1, nodestorep, storeavail);
+        nfound += path_finditem(atnode, refpath + 1, nodestorep, storeavail);
 
     } while ((atnode = atnode->next) != NULL);
 
@@ -338,8 +354,8 @@ static int path_getobject(ltjson_node_t *atnode, ltjson_rpath_t *refpath,
  *  found into the @nodeptr node array up to a max of @nnodes.
  *
  *  The reference path is an expression that must start with a / to
- *  represent the root, followed by / separated object or array
- *  references. Use [] to represent array offsets:
+ *  represent the root, followed by / separated object member or array
+ *  element references. Use [] to represent array offsets:
  *          /phoneNumbers/type
  *          /phoneNumbers[1]/type
  *          /[3]/store/book
@@ -347,6 +363,10 @@ static int path_getobject(ltjson_node_t *atnode, ltjson_rpath_t *refpath,
  *  denote "all elements" in the array. The offset is 0 based.
  *  If an array is last item in a path, the array is returned, not
  *  all the elements of the array (as for other parts of the path).
+ *
+ *  As, somewhat unfortunately, a name of "" is strictly allowed
+ *  under the json specification, the use of the illegal utf-8
+ *  sequence 0xFF is used to represent an empty name in a path.
  *
  *  Returns: Number of matches found (not stored) on success or
  *           0 on failure and, if an error, sets errno to one of
@@ -389,7 +409,7 @@ int ltjson_pathrefer(ltjson_node_t *tree, const char *path,
         return 0;
     }
 
-    ret = path_getobject(tree, refpaths, &nodeptr, &nnodes);
+    ret = path_finditem(tree, refpaths, &nodeptr, &nnodes);
     if (!ret)
         errno = 0;
 

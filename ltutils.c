@@ -54,7 +54,12 @@ static void print_nodeinfo(ltjson_node_t *node, int spaces)
     printf("%*s", spaces, "");
 
     if (node->ancnode && node->ancnode->ntype == LTJSON_NTYPE_OBJECT)
-        printf("%s : ", node->name);
+    {
+        if (*node->name == '\0')
+            printf("(no name) : ");
+        else
+            printf("%s : ", node->name);
+    }
 
     switch (node->ntype)
     {
@@ -109,18 +114,30 @@ static void print_nodeinfo(ltjson_node_t *node, int spaces)
 
 
 /**
- *  ltjson_display(tree) - Display the contents of the JSON tree
- *      @tree:   Valid closed tree
- *      @rnode:  Optional node to act as display root (NULL if unused)
+ *  ltjson_display(rnode) - Display the contents of a JSON subtree
+ *      @rnode:  Node to act as display root
+ *
+ *  Display the JSON tree rooted at rnode, which can be an entire
+ *  subtree or just one node. The tree must be valid and closed to
+ *  do this and the routine walks back to the root to check.
  *
  *  Returns: 1 on success
  *           0 if tree is not valid/closed and sets errno (EINVAL)
  */
 
-int ltjson_display(ltjson_node_t *tree, ltjson_node_t *rnode)
+int ltjson_display(ltjson_node_t *rnode)
 {
-    ltjson_node_t *curnode;
+    ltjson_node_t *tree, *curnode;
     int depth = 0;
+
+    if (!rnode)
+    {
+        errno = EINVAL;
+        return 0;
+    }
+
+    for (tree = rnode; tree->ancnode != NULL; tree = tree->ancnode)
+        ;
 
     if (!is_closed_tree(tree))
     {
@@ -129,9 +146,6 @@ int ltjson_display(ltjson_node_t *tree, ltjson_node_t *rnode)
     }
 
     printf("JSON tree:\n");
-
-    if (!rnode)
-        rnode = tree;
 
     if (rnode->ntype != LTJSON_NTYPE_ARRAY &&
         rnode->ntype != LTJSON_NTYPE_OBJECT)
@@ -341,24 +355,20 @@ void ltjson_statdump(ltjson_node_t *tree)
 
 
 /**
- *  ltjson_findname(tree, name, nodeptr) - Find name in tree
+ *  ltjson_get_hashstring(tree, name) - Lookup a name in the hash table
  *      @tree:  Valid closed tree
- *      @name:  Search text (utf-8)
- *      @node:  Optional starting point
+ *      @name:  An object member name
  *
- *  If node is NULL, the search begins at the root of the tree.
- *  Otherwise, the search proceeds from *after* that node point.
- *
- *  Returns: a pointer to the matched node on success
- *           NULL on failure setting errno to EINVAL if error
+ *  Returns: Pointer to constant string on success
+ *           NULL on failure with errno is set to:
+ *              EINVAL if tree is not valid/closed etc
+ *              ENOENT if tree has no hash table
+ *              0      if entry not found (not really an error)
  */
 
-ltjson_node_t *ltjson_findname(ltjson_node_t *tree, const char *name,
-                               ltjson_node_t *fromnode)
+const char *ltjson_get_hashstring(ltjson_node_t *tree, const char *name)
 {
-    ltjson_node_t *curnode;
     ltjson_info_t *jsoninfo;
-    static const char *prevname, *hashname;
 
     if (!is_closed_tree(tree) || !name)
     {
@@ -368,78 +378,355 @@ ltjson_node_t *ltjson_findname(ltjson_node_t *tree, const char *name,
 
     jsoninfo = (ltjson_info_t *)tree;
 
-    if (fromnode)
+    return nhash_lookup(jsoninfo, name);
+}
+
+
+
+
+/**
+ *  ltjson_mksearch(tree, name, flagsp) - Create a searchable name
+ *      @tree:   Valid closed tree
+ *      @name:   An object member name
+ *      @flagsp: Pointer to search flags
+ *
+ *  This is really just a helper function to create a search name without
+ *  messing around figuring out if the tree is hashed or not. It fetches
+ *  a hash value for name if the tree is hashed otherwise returns a pointer
+ *  to the name passed in. If that name is NULL, this function will return
+ *  the empty string. The flags pointer is twiddled to add or remove the
+ *  LTJSON_SEARCH_NAMEISHASH flag.
+ *
+ *  Returns: Pointer to constant string (will not fail)
+ *           However, still sets errno to reflect issues:
+ *              EINVAL if tree is not valid/closed/etc
+ *              ENOENT if tree is hashed and name is not there
+ *              0      if returned string is good for searching
+ */
+
+const char *ltjson_mksearch(ltjson_node_t *tree, const char *name, int *flagsp)
+{
+    const char *srch;
+
+    srch = ltjson_get_hashstring(tree, name);
+    if (!srch)
     {
-        if ((curnode = traverse_tree_nodes(fromnode)) == NULL)
+        if (*flagsp)
+            *flagsp &= ~LTJSON_SEARCH_NAMEISHASH;
+
+        if (errno == EINVAL)
         {
+            return ltjson_empty_name;
+        }
+        else if (errno == ENOENT)
+        {
+            /* Tree has no hash table - this is fine */
             errno = 0;
-            return NULL;
+            return name;
         }
-    }
-    else
-    {
-        curnode = tree;
-    }
-
-    if (jsoninfo->nhtab)
-    {
-        struct nhashcell *nhcp;
-        unsigned long hashval;
-
-        if (prevname != name)
+        else
         {
-            /* Didn't do this search before... */
-
-            prevname = name;
-            hashname = 0;
-
-            hashval = djbhash(name) % NHASH_NBUCKETS;
-
-            for (nhcp = jsoninfo->nhtab[hashval];
-                        nhcp != NULL;
-                        nhcp = nhcp->next)
-            {
-                if (strcmp(name, nhcp->s) == 0)
-                {
-                    hashname = nhcp->s;
-                    break;
-                }
-            }
-        }
-
-        if (!hashname)
-        {
-            errno = 0;
-            return NULL;
+            /* Tree has a hash table, not found. Not good */
+            errno = ENOENT;
+            return name;
         }
     }
-    else
+
+    if (*flagsp)
+        *flagsp |= LTJSON_SEARCH_NAMEISHASH;
+
+    errno = 0;
+    return srch;
+}
+
+
+
+
+/**
+ *  ltjson_get_member(objnode, name, flags) - Retrieve object member
+ *      @objnode: A pointer to an object node
+ *      @name:    An object member name
+ *      @flags:   Optional search flags
+ *
+ *  Look through the object pointed to by @objnode for the member @name.
+ *  Flags supported are: LTJSON_SEARCH_NAMEISHASH to denote that the
+ *  name is one retrieved using ltjson_get_hashstring. This function does
+ *  not recurse down a tree, just hops from node to node within the object.
+ *
+ *  This routine does not check if @objnode is part of a closed tree.
+ *
+ *  Returns: Pointer to the matched node on success
+ *           NULL on failure with errno is set to:
+ *              EINVAL if passed null parameters
+ *              EPERM  if objnode is not an object
+ *              0      if entry not found (not really an error)
+ *
+ */
+
+ltjson_node_t *ltjson_get_member(ltjson_node_t *objnode,
+                                 const char *name, int flags)
+{
+    if (!objnode || !name)
     {
-        hashname = 0;
+        errno = EINVAL;
+        return NULL;
     }
 
-
-    while (curnode)
+    if (objnode->ntype != LTJSON_NTYPE_OBJECT)
     {
-        if (curnode->name)
+        errno = EPERM;
+        return NULL;
+    }
+
+    objnode = objnode->val.subnode;
+
+    if (!objnode)
+    {
+        errno = 0;
+        return NULL;
+    }
+
+    do {
+        if (flags & LTJSON_SEARCH_NAMEISHASH)
         {
-            if (hashname)
-            {
-                /* Pointers will be the same iff hashed */
-                if (hashname == curnode->name)
-                    return curnode;
-            }
-            else if (strcmp(curnode->name, name) == 0)
-            {
-                return curnode;
-            }
+            if (objnode->name == name)
+                return objnode;
+        }
+        else
+        {
+            if (*objnode->name == *name && strcmp(objnode->name, name) == 0)
+                return objnode;
         }
 
-        curnode = traverse_tree_nodes(curnode);
-    }
+    } while ((objnode = objnode->next) != NULL);
 
     errno = 0;
     return NULL;
+}
+
+
+
+
+/*
+ *  add_new_node(...) - Generic call for addnode_after and addnode_under
+ *
+ *  jsoninfo is a pointer to the json info struct and must be valid.
+ *
+ *  Returns: (as addnode_after)
+ */
+
+static ltjson_node_t *add_new_node(ltjson_info_t *jsoninfo,
+                                   ltjson_node_t *refnode,
+                                   int new_is_after,
+                                   short int ntype, const char *name,
+                                   const char *sval)
+{
+    ltjson_node_t *newnode, *oanode;
+    const char *nvstr;
+
+    assert(jsoninfo);
+
+    if (!refnode || (new_is_after && !refnode->ancnode))
+    {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    if (ntype <= LTJSON_NTYPE_BASENODE || ntype > LTJSON_NTYPE_STRING)
+    {
+        errno = ERANGE;
+        return NULL;
+    }
+
+    /* Set oanode to the relevant object or array node and check it */
+
+    if (new_is_after)
+        oanode = refnode->ancnode;
+    else
+        oanode = refnode;
+
+    if (oanode->ntype != LTJSON_NTYPE_OBJECT &&
+        oanode->ntype != LTJSON_NTYPE_ARRAY)
+    {
+        errno = EPERM;
+        return NULL;
+    }
+
+    if (oanode->ntype == LTJSON_NTYPE_OBJECT && !name)
+    {
+        errno = EINVAL;
+        return NULL;
+    }
+
+
+    /* Get a new node and optionally add name to hash */
+
+    if ((newnode = get_new_node(jsoninfo)) == NULL)
+        return NULL;
+
+    if (oanode->ntype == LTJSON_NTYPE_OBJECT)
+    {
+        if ((nvstr = nhash_insert(jsoninfo, name)) == NULL)
+            return NULL;
+    }
+    else
+    {
+        nvstr = NULL;
+    }
+
+    newnode->name   = nvstr;
+    newnode->ntype  = ntype;
+    newnode->nflags = 0;
+
+
+    switch (ntype)
+    {
+        case LTJSON_NTYPE_NULL:
+        case LTJSON_NTYPE_BOOL:
+        case LTJSON_NTYPE_INTEGER:
+            newnode->val.ll = 0;
+        break;
+
+        case LTJSON_NTYPE_ARRAY:
+        case LTJSON_NTYPE_OBJECT:
+            newnode->val.subnode = NULL;
+        break;
+
+        case LTJSON_NTYPE_FLOAT:
+            newnode->val.d = 0.0;
+        break;
+
+        case LTJSON_NTYPE_STRING:
+        {
+            if (!sval || !*sval)
+            {
+                nvstr = ltjson_empty_name;
+            }
+            else
+            {
+                nvstr = sstore_add(&jsoninfo->sstore, sval);
+                if (!nvstr)
+                    return NULL;
+            }
+
+            newnode->val.s = nvstr;
+        }
+        break;
+    }
+
+
+    /* Finally insert node into tree */
+
+    if (new_is_after)
+    {
+        /* Insert after refnode: */
+        newnode->next    = refnode->next;
+        newnode->ancnode = refnode->ancnode;
+        refnode->next    = newnode;
+    }
+    else
+    {
+        /* Insert below refnode: */
+        newnode->next        = refnode->val.subnode;
+        newnode->ancnode     = refnode;
+        refnode->val.subnode = newnode;
+    }
+
+    return newnode;
+}
+
+
+
+
+/**
+ *  ltjson_addnode_after(tree, anode, ntype, name, sval) - Add a node after
+ *      @tree:   Valid closed tree
+ *      @anode:  Node after which to insert the new node
+ *      @ntype:  New node type
+ *      @name:   New node name, if applicable
+ *      @sval:   New node string value, if applicable
+ *
+ *  Insert a new node after @anode with the type @ntype. If anode's
+ *  ancestor node is an object, name is required. The ancestor of anode
+ *  must be an array or object and cannot be the root of the tree.
+ *
+ *  If the ntype is LTJSON_NTYPE_STRING then sval is used, if supplied,
+ *  to set the new node's string value. sval may be null or "" in which
+ *  case the value is a local static equal to "". You may then set sval
+ *  to another value.
+ *
+ *  For ntypes of integer and float, you need to set the value yourself.
+ *
+ *  Returns: Pointer to the matched node on success
+ *           NULL on failure with errno is set to:
+ *              EINVAL if passed incorrect parameters
+ *              ERANGE if ntype out of range for a node
+ *              EPERM  if anode's ancestor is not an object or array
+ *              ENOMEM if out of memory during node creation (tree remains)
+ */
+
+ltjson_node_t *ltjson_addnode_after(ltjson_node_t *tree, ltjson_node_t *anode,
+                                    short int ntype, const char *name,
+                                    const char *sval)
+{
+    ltjson_info_t *jsoninfo;
+
+    if (!tree || !anode || !is_closed_tree(tree))
+    {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    jsoninfo = (ltjson_info_t *)tree;
+
+    return add_new_node(jsoninfo, anode, 1, ntype, name, sval);
+}
+
+
+
+
+/**
+ *  ltjson_addnode_under(tree, oanode, ntype, name, sval) - Add a node under
+ *      @tree:   Valid closed tree
+ *      @oanode: Object or array node under which to insert the new node
+ *      @ntype:  New node type
+ *      @name:   New node name, if applicable
+ *      @sval:   New node string value, if applicable
+ *
+ *  Insert a new node beneath @oanode with the type @ntype. If oanode
+ *  is an object, name is required. oanode must be an array or object
+ *  and can be the root of the tree.
+ *
+ *  If the ntype is LTJSON_NTYPE_STRING then sval is used, if supplied,
+ *  to set the new node's string value. sval may be null or "" in which
+ *  case the value is a local static equal to "". You may then set sval
+ *  to another value.
+ *
+ *  For ntypes of integer and float, you need to set the value yourself.
+ *
+ *  Returns: Pointer to the matched node on success
+ *           NULL on failure with errno is set to:
+ *              EINVAL if passed incorrect parameters
+ *              ERANGE if ntype out of range for a node
+ *              EPERM  if oanode is not an object or array
+ *              ENOMEM if out of memory during node creation (tree remains)
+ */
+
+ltjson_node_t *ltjson_addnode_under(ltjson_node_t *tree, ltjson_node_t *oanode,
+                                    short int ntype, const char *name,
+                                    const char *sval)
+{
+    ltjson_info_t *jsoninfo;
+
+    if (!tree || !oanode || !is_closed_tree(tree))
+    {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    jsoninfo = (ltjson_info_t *)tree;
+
+    return add_new_node(jsoninfo, oanode, 0, ntype, name, sval);
 }
 
 

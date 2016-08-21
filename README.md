@@ -12,6 +12,10 @@ I did this to keep file sizes reasonable inside a static namespace.
 
 I use mingw so there's a quick make.bat to compile test.exe.
 
+## Authors
+* Conor O'Rourke
+* [Merge sort algorithm](http://www.chiark.greenend.org.uk/~sgtatham/algorithms/listsort.html) described by S. Tatham
+
 ## Basic usage
 
 * Include
@@ -72,7 +76,6 @@ many duplicate names. If false, a recycled tree will lose the hash.
    - EILSEQ if invalid JSON sequence (reason available)
    - ENOMEM if out of memory
   On ENOMEM, all storage will be freed and *treeptr is set to NULL
-
 <hr />
 
 #### ltjson_free(treeptr) - Free up all memory associate with tree
@@ -96,7 +99,7 @@ many duplicate names. If false, a recycled tree will lose the hash.
 
 #### ltjson_display(rnode) - Display the contents of a JSON subtree
 *Parameters*
-* @rnode:  Node to act as display root
+* rnode:  Node to act as display root
 
 *Description*
   
@@ -107,6 +110,7 @@ do this and the routine walks back to the root to check.
 *Returns*
 * 1 on success
 * 0 if tree is not valid/closed and sets errno (EINVAL)
+<hr />
 
 
 ### Statistics
@@ -144,6 +148,8 @@ Tree does not have to be closed. No changes are made
 *Description*
 
 Tree does not have to be closed. No changes are made
+<hr />
+
 
 ### Search and sort
 
@@ -231,6 +237,7 @@ This routine does not check if @objnode is part of a closed tree.
     - EINVAL if passed null parameters
     - EPERM  if rnode is not an object/array
     - 0      if entry not found (not really an error)
+<hr />
 
 
 ### Utility functions
@@ -313,6 +320,7 @@ This routine does not check if @objnode is part of a closed tree.
     - EINVAL if passed null parameters
     - EPERM  if objnode is not an object
     - 0      if entry not found (not really an error)
+<hr />
 
 
 ### Adding
